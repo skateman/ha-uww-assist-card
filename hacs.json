@@ -1,0 +1,7 @@
+{
+  "name": "uww Assist Card",
+  "filename": "ha-uww-assist-card.zip",
+  "zip_release": true,
+  "render_readme": true,
+  "homeassistant": "2024.6.0"
+}

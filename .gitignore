@@ -1,0 +1,14 @@
+node_modules/
+*.log
+.DS_Store
+.cache/
+.vite/
+.tsbuildinfo
+
+# Built artefacts — produced by CI on every tag.
+dist/
+
+# Local dev / Playwright artefacts.
+.playwright-mcp/
+*.png
+!info/**/*.png

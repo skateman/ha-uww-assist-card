@@ -1,0 +1,85 @@
+name: Tag and release
+
+# On version bump in package.json (merged to main): create the matching
+# `v<version>` tag AND publish a GitHub Release with the built zip
+# (so HACS custom-repo installs find the asset). Doing both in one
+# workflow avoids the GITHUB_TOKEN-doesn't-trigger-other-workflows
+# limitation.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version + check tag
+        id: check
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "Local version: $version"
+          if [ -z "$version" ]; then
+            echo "::error::package.json has no version"
+            exit 1
+          fi
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "::notice::Tag v$version already exists — skipping release."
+            echo "create=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "create=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.create == 'true'
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install + build
+        if: steps.check.outputs.create == 'true'
+        run: |
+          npm ci
+          npm run build
+          test -f dist/ha-uww-assist-card.js
+          test -d dist/wasm
+          ls dist/wasm | grep -q tflite_web_api_cc.wasm
+
+      - name: Package release zip
+        if: steps.check.outputs.create == 'true'
+        run: |
+          (cd dist && zip -r ../ha-uww-assist-card.zip .)
+          unzip -l ha-uww-assist-card.zip | head -20
+
+      - name: Create + push tag
+        if: steps.check.outputs.create == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Create GitHub release
+        if: steps.check.outputs.create == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.check.outputs.version }}
+          files: |
+            ha-uww-assist-card.zip
+            dist/ha-uww-assist-card.js
+            dist/ha-uww-assist-card.js.map
+          generate_release_notes: true
+          fail_on_unmatched_files: true

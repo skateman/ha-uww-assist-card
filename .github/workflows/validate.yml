@@ -1,0 +1,33 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Bundle size budget
+        run: |
+          size=$(stat -c%s dist/ha-uww-assist-card.js)
+          echo "Bundle size: $size bytes"
+          if [ "$size" -gt 3145728 ]; then
+            echo "::warning::Bundle exceeds 3 MB budget"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ha-uww-assist-card-dist
+          path: dist/
+          retention-days: 14
