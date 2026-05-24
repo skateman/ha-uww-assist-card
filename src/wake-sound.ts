@@ -72,6 +72,22 @@ function playBeep(c: AudioContext, t0: number): Promise<void> {
   return waitMs(150);
 }
 
+/** Play a short "now listening" cue (distinct from wake-detection sound). */
+export function playListeningCue(name: WakeSoundName): Promise<void> {
+  if (name === 'none') return Promise.resolve();
+  try {
+    const c = ctx();
+    const now = c.currentTime;
+    // Higher, snappier than the wake chime — easy to distinguish.
+    schedule(c, now, 0.08, 1760, 'sine', 0.7); // A6
+    return waitMs(100);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('uww-assist-card: listening cue failed', err);
+    return Promise.resolve();
+  }
+}
+
 function schedule(
   c: AudioContext,
   start: number,

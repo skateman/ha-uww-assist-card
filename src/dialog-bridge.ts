@@ -12,6 +12,8 @@ export interface OpenOptions {
   companionApp: CompanionApp;
   /** Enable PipelineObserver auto-close on non-continuing turns. */
   autoClose: boolean;
+  /** Called when STT enters its listening phase (so the caller can play a cue). */
+  onSttStart?: () => void;
   /** Called exactly once when the dialog is dismissed or the safety net fires. */
   onClose: () => void;
 }
@@ -215,7 +217,10 @@ export class AssistDialogBridge {
     // Install pipeline observer (if requested) so we can auto-close
     // the dialog when the AI's response doesn't ask for a follow-up.
     if (opts.autoClose) {
-      this.observer = new PipelineObserver(() => this.requestDialogClose());
+      this.observer = new PipelineObserver(
+        () => this.requestDialogClose(),
+        opts.onSttStart,
+      );
       this.observer.install(opts.hass);
     }
 

@@ -6,7 +6,7 @@ import { friendlyError } from './errors.js';
 import { MicLeaseManager } from './mic-lease.js';
 import type { CardStatus, HassLite, UwwAssistCardConfig } from './types.js';
 import { WakeWordRunner } from './wake-word.js';
-import { playWakeSound, type WakeSoundName } from './wake-sound.js';
+import { playWakeSound, playListeningCue, type WakeSoundName } from './wake-sound.js';
 
 declare const __HA_UWW_VERSION__: string;
 
@@ -517,6 +517,11 @@ export class UwwAssistCard extends LitElement {
       pipelineId: this._config.pipeline_id,
       companionApp: this._config.companion_app ?? 'dialog',
       autoClose: this._config.auto_close !== false,
+      onSttStart: () => {
+        // eslint-disable-next-line no-console
+        console.debug('uww-assist-card: STT started — playing listening cue');
+        void playListeningCue(soundName);
+      },
       onClose: () => {
         // eslint-disable-next-line no-console
         console.debug('uww-assist-card: bridge.onClose fired');

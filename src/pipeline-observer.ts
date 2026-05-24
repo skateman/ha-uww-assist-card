@@ -61,9 +61,11 @@ export class PipelineObserver {
   private installed = false;
   private continueConversation = false;
   private readonly onCloseRequested: () => void;
+  private readonly onSttStart?: () => void;
 
-  constructor(onCloseRequested: () => void) {
+  constructor(onCloseRequested: () => void, onSttStart?: () => void) {
     this.onCloseRequested = onCloseRequested;
+    this.onSttStart = onSttStart;
   }
 
   public install(hass: HassLite | undefined): void {
@@ -148,6 +150,19 @@ export class PipelineObserver {
         // turn's value doesn't leak.
         this.continueConversation = false;
         break;
+      case 'stt-start':
+        // STT engine is ready and listening — emit a cue so the user
+        // knows they can speak (HA's dialog UI may not be visible on
+        // small screens like the Mi Smart Clock).
+        if (this.onSttStart) {
+          try {
+            this.onSttStart();
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.error('uww-assist-card: onSttStart threw', err);
+          }
+        }
+        break;
       case 'intent-end':
         this.continueConversation =
           ev.data?.intent_output?.continue_conversation === true;
@@ -166,7 +181,7 @@ export class PipelineObserver {
           this.requestClose('run-end without continue_conversation');
         }
         break;
-      // Other events (stt-start, stt-vad-end, stt-end, intent-progress,
+      // Other events (stt-vad-end, stt-end, intent-progress,
       // intent-start, tts-start, tts-end) are not our business — they
       // continue to flow through to ha-assist-chat untouched.
       default:
