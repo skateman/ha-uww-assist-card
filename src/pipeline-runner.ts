@@ -207,13 +207,27 @@ export class PipelineRunner {
         }
         break;
       }
-      case 'error':
+      case 'error': {
+        const code = ev.data?.code ?? '';
+        // Non-fatal pipeline endings: HA emits an `error` event for
+        // things like "no speech detected" mid-turn. These should end
+        // this turn but not be treated as failures by the caller —
+        // otherwise routine empty wakes brick the card.
+        const NON_FATAL = new Set([
+          'stt-no-text-recognized',
+          'stt-stream-failed',
+          'intent-failed',
+          'tts-failed',
+        ]);
         // eslint-disable-next-line no-console
         console.warn(
-          `uww-assist-card: pipeline error: ${ev.data?.code} ${ev.data?.message}`,
+          `uww-assist-card: pipeline error: ${code} ${ev.data?.message ?? ''}`,
         );
-        this.finish('error');
+        // Continue-conversation is now invalid; force a normal end.
+        this.continueConversation = false;
+        this.finish(NON_FATAL.has(code) ? 'normal' : 'error');
         break;
+      }
       case 'run-end':
         void this.onRunEnd();
         break;

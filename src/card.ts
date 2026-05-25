@@ -621,20 +621,19 @@ export class UwwAssistCard extends LitElement {
     if (this._runner) {
       this._runner.setFrameSink(null);
     }
-    if (reason === 'error' || reason === 'safety') {
-      // Tear the wake runner down so a future Retry/arm rebuilds it
-      // from scratch — otherwise `_runner` lingers in 'muted' mode
-      // and `_startRunnerWithLease` short-circuits.
-      this._runner?.setAudioMode('muted');
-      await this._teardownRunner({ keepWants: true });
-      this._setError(new Error('Pipeline run failed'));
-      return;
-    }
     if (reason === 'lease-lost') {
-      // Lease handler already kicked off teardown; reflect the
-      // waiting-for-lease state without claiming we're listening.
+      // Lease handler kicked off teardown; reflect waiting state.
       this._status = this._wantsArm ? 'loading' : 'idle';
       return;
+    }
+    if (reason === 'error' || reason === 'safety') {
+      // Surface the error transiently but DO NOT tear down the wake
+      // runner — the mic + worklet are still healthy and the user
+      // can wake again. Re-arming on detector mode after the
+      // blackout window restores normal behaviour.
+      //
+      // eslint-disable-next-line no-console
+      console.warn(`uww-assist-card: pipeline turn failed (${reason})`);
     }
     if (!this._wantsArm || !this._runner) {
       this._status = 'idle';
