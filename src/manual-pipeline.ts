@@ -2,6 +2,8 @@ import { Detector, InferencePipeline } from 'uww.js';
 
 import { ResamplingAudioCapture } from './resampling-capture.js';
 
+export type AudioMode = 'detector' | 'pipeline' | 'muted';
+
 export interface ManualPipelineOptions {
   /** Raw model bytes (or URL) — same shape uww.js accepts. */
   wakeWordModel: string | ArrayBuffer;
@@ -24,6 +26,12 @@ export interface ManualPipelineOptions {
  * native rate and downsample in an AudioWorklet, instead of feeding
  * mis-aligned audio to the model.
  *
+ * Also the **primary** path for the native pipeline runner: we keep
+ * the mic + worklet alive across wake → STT streaming → TTS playback
+ * and just switch the {@link mode} so frames go to the right consumer
+ * (detector for wake-word, pipeline-sink for STT streaming, dropped
+ * during TTS playback to avoid self-trigger).
+ *
  * Behaviour mirrors UWW's `wake` / `error` events; `wakeWordName` is
  * not available here (callers carry that themselves from the
  * manifest if they need it).
@@ -35,8 +43,31 @@ export class ManualWakeWordPipeline {
   private frameSize = 0;
   private processingFrame = false;
   private running = false;
+  private mode: AudioMode = 'detector';
+  private frameSink: ((frame: Float32Array) => void) | null = null;
 
   constructor(private readonly opts: ManualPipelineOptions) {}
+
+  /**
+   * Switch frame routing.
+   *   `detector` – feed frames to the wake-word inference (default).
+   *   `pipeline` – forward frames to {@link setFrameSink}; skip detector.
+   *   `muted`    – drop all frames (mic stays open, no consumption).
+   */
+  setMode(mode: AudioMode): void {
+    this.mode = mode;
+    if (mode === 'detector') {
+      // Reset model state when re-arming so previous audio context
+      // doesn't bleed into the next wake.
+      this.detector?.reset();
+      this.pipeline.resetState();
+    }
+  }
+
+  /** Where pipeline-mode frames go. */
+  setFrameSink(sink: ((frame: Float32Array) => void) | null): void {
+    this.frameSink = sink;
+  }
 
   async start(): Promise<void> {
     if (this.running) return;
@@ -76,6 +107,8 @@ export class ManualWakeWordPipeline {
     this.detector?.reset();
     this.pipeline.resetState();
     this.running = false;
+    this.mode = 'detector';
+    this.frameSink = null;
   }
 
   async dispose(): Promise<void> {
@@ -86,6 +119,21 @@ export class ManualWakeWordPipeline {
   }
 
   private handleFrame(frame: Float32Array): void {
+    switch (this.mode) {
+      case 'muted':
+        return;
+      case 'pipeline':
+        try {
+          this.frameSink?.(frame);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn('uww-assist-card: frame sink threw', err);
+        }
+        return;
+      case 'detector':
+      default:
+        break;
+    }
     if (!this.detector || this.processingFrame) return;
     this.processingFrame = true;
     try {

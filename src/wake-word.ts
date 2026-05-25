@@ -1,9 +1,10 @@
 import { UWW, fetchManifest, validateManifest, type WakeWordManifest } from 'uww.js';
 
-import { ManualWakeWordPipeline } from './manual-pipeline.js';
+import { ManualWakeWordPipeline, type AudioMode } from './manual-pipeline.js';
 import { loadManifestAndModel, loadModel } from './model-cache.js';
 import type { HassLite, UwwAssistCardConfig } from './types.js';
 
+export type { AudioMode } from './manual-pipeline.js';
 export type WakeWordEvent = 'wake' | 'statuschange' | 'error';
 
 export interface WakeWordRunnerEvents {
@@ -83,6 +84,16 @@ export class WakeWordRunner {
       return;
     }
 
+    // Native runner needs to own the mic stream so it can redirect
+    // frames to the pipeline after wake. UWW owns its own internal
+    // mic, so for native mode we must skip UWW entirely and go
+    // straight to the manual pipeline.
+    if (this.config.runner === 'native') {
+      if (!this.resolved) this.resolved = await this.resolveWakeWord();
+      await this.startManual();
+      return;
+    }
+
     if (!this.uww) {
       // First start of the session: resolve source once (caches the
       // bytes/manifest for any subsequent fallback to manual).
@@ -110,6 +121,26 @@ export class WakeWordRunner {
       );
       await this.switchToManual();
     }
+  }
+
+  /**
+   * Route post-wake audio frames. Only meaningful when the manual
+   * pipeline is in use (native runner or Safari/iOS fallback). On
+   * UWW (dialog mode at 16 kHz native) this is a no-op — UWW owns
+   * the mic and we don't see frames.
+   */
+  public setAudioMode(mode: AudioMode): void {
+    this.manual?.setMode(mode);
+  }
+
+  /** Set the sink for `pipeline`-mode frames. */
+  public setFrameSink(sink: ((frame: Float32Array) => void) | null): void {
+    this.manual?.setFrameSink(sink);
+  }
+
+  /** True when audio mode switching is available (i.e., manual path active). */
+  public get supportsFrameRouting(): boolean {
+    return this.manual !== null;
   }
 
   /** Stop listening. Releases the {@link MediaStream}; model stays loaded. */
@@ -156,9 +187,11 @@ export class WakeWordRunner {
     } catch {
       /* ignore */
     }
+    await this.startManual();
+  }
 
-    // Cached source bytes — manual pipeline doesn't care whether they
-    // came from a manifest or a raw model URL.
+  private async startManual(): Promise<void> {
+    if (!this.resolved) return;
     const modelData = this.resolved.modelData;
     const manifest = this.resolved.manifest;
 

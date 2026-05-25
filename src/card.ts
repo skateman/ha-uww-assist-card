@@ -4,6 +4,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { AssistDialogBridge } from './dialog-bridge.js';
 import { friendlyError } from './errors.js';
 import { MicLeaseManager } from './mic-lease.js';
+import { PipelineRunner, type PipelineStage } from './pipeline-runner.js';
 import type { CardStatus, HassLite, UwwAssistCardConfig } from './types.js';
 import { WakeWordRunner } from './wake-word.js';
 import { playWakeSound, playListeningCue, type WakeSoundName } from './wake-sound.js';
@@ -38,6 +39,7 @@ export class UwwAssistCard extends LitElement {
   private _lease?: MicLeaseManager;
   private _runner?: WakeWordRunner;
   private _bridge?: AssistDialogBridge;
+  private _nativeRunner?: PipelineRunner;
   private _runnerCleanups: Array<() => void> = [];
   private _wantsArm = false;
   /** Wall-clock ms; wake events with timestamp before this are dropped. */
@@ -106,6 +108,7 @@ export class UwwAssistCard extends LitElement {
       auto_close: 'Auto-close after turn',
       strict_sample_rate: 'Strict sample-rate check',
       wake_sound: 'Wake-detection sound',
+      runner: 'Assist runner',
       companion_app: 'HA Companion app behavior',
       threshold: 'Detection threshold (0–1)',
       sliding_window_size: 'Sliding window (frames)',
@@ -123,6 +126,8 @@ export class UwwAssistCard extends LitElement {
         'Hard-fail instead of using in-browser resampling on browsers that ignore the requested 16 kHz rate (Safari/iOS).',
       wake_sound:
         'Short audible cue played on detection, before HA opens the voice dialog.',
+      runner:
+        'Dialog = open HA\u2019s voice-command dialog. Native = drive the pipeline directly over WebSocket (faster on small/laggy devices; no chat UI).',
       companion_app:
         'In the HA mobile app, hand off to the native Assist UI instead of opening the in-page dialog.',
       wasm_path:
@@ -142,6 +147,18 @@ export class UwwAssistCard extends LitElement {
               { value: 'chime', label: 'Chime (default)' },
               { value: 'beep', label: 'Beep' },
               { value: 'none', label: 'None (silent)' },
+            ],
+          },
+        },
+      },
+      {
+        name: 'runner',
+        selector: {
+          select: {
+            mode: 'dropdown' as const,
+            options: [
+              { value: 'dialog', label: 'Dialog (default \u2014 HA voice-command dialog)' },
+              { value: 'native', label: 'Native (direct pipeline, faster)' },
             ],
           },
         },
@@ -390,6 +407,7 @@ export class UwwAssistCard extends LitElement {
     });
     this._lease.on('lost', () => {
       this._leaseHeld = false;
+      this._nativeRunner?.cancel('lease-lost');
       void this._teardownRunner({ keepWants: true });
     });
     return this._lease;
@@ -484,9 +502,9 @@ export class UwwAssistCard extends LitElement {
 
   private async _handleWake(): Promise<void> {
     if (!this._config || !this._runner) return;
-    if (this._bridge?.open) {
+    if (this._bridge?.open || this._nativeRunner) {
       // eslint-disable-next-line no-console
-      console.debug('uww-assist-card: wake ignored (dialog already up)');
+      console.debug('uww-assist-card: wake ignored (turn already in progress)');
       return;
     }
 
@@ -497,14 +515,23 @@ export class UwwAssistCard extends LitElement {
     void playWakeSound(soundName);
 
     // Flash status to 'wake' briefly so the UI shows something even
-    // before the dialog has rendered.
+    // before the dialog/native runner has started.
     this._status = 'wake';
+
+    if (this._config.runner === 'native') {
+      await this._handleWakeNative(soundName);
+    } else {
+      await this._handleWakeDialog(soundName);
+    }
+  }
+
+  private async _handleWakeDialog(soundName: WakeSoundName): Promise<void> {
     // eslint-disable-next-line no-console
     console.debug('uww-assist-card: wake → pausing runner, opening dialog');
 
     // Release the mic before the dialog tries to acquire it.
     try {
-      await this._runner.pause();
+      await this._runner!.pause();
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn('uww-assist-card: runner pause failed', err);
@@ -514,9 +541,9 @@ export class UwwAssistCard extends LitElement {
     const bridge = (this._bridge ??= new AssistDialogBridge(this));
     void bridge.openDialog({
       hass: this.hass,
-      pipelineId: this._config.pipeline_id,
-      companionApp: this._config.companion_app ?? 'dialog',
-      autoClose: this._config.auto_close !== false,
+      pipelineId: this._config!.pipeline_id,
+      companionApp: this._config!.companion_app ?? 'dialog',
+      autoClose: this._config!.auto_close !== false,
       onSttStart: () => {
         // eslint-disable-next-line no-console
         console.debug('uww-assist-card: STT started — playing listening cue');
@@ -528,6 +555,98 @@ export class UwwAssistCard extends LitElement {
         void this._afterDialogClose();
       },
     });
+  }
+
+  private async _handleWakeNative(soundName: WakeSoundName): Promise<void> {
+    if (!this._runner!.supportsFrameRouting) {
+      // Shouldn't happen — config forces manual path, but defend.
+      // eslint-disable-next-line no-console
+      console.error(
+        'uww-assist-card: native runner requires manual audio path; falling back to dialog',
+      );
+      await this._handleWakeDialog(soundName);
+      return;
+    }
+    this._status = 'busy';
+
+    const runner = new PipelineRunner({
+      hass: this.hass,
+      pipelineId: this._config!.pipeline_id,
+      setAudioMode: (mode) => this._runner!.setAudioMode(mode),
+      onStage: (stage) => this._onNativeStage(stage, soundName),
+      onDone: (reason) => void this._afterNativeRun(reason),
+    });
+    this._nativeRunner = runner;
+    this._runner!.setFrameSink((frame) => runner.feedFrame(frame));
+    this._runner!.setAudioMode('pipeline');
+    try {
+      await runner.start();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('uww-assist-card: native runner start failed', err);
+      runner.cancel('cancel');
+    }
+  }
+
+  private _onNativeStage(stage: PipelineStage, soundName: WakeSoundName): void {
+    switch (stage) {
+      case 'starting':
+        this._status = 'busy';
+        break;
+      case 'listening':
+        this._status = 'listening';
+        // Cue the user that STT is actually live (matches the dialog
+        // path's behaviour on `stt-start`).
+        void playListeningCue(soundName);
+        break;
+      case 'thinking':
+        this._status = 'thinking';
+        break;
+      case 'speaking':
+        this._status = 'speaking';
+        break;
+      case 'done':
+      case 'error':
+        // Final state — handled by onDone.
+        break;
+    }
+  }
+
+  private async _afterNativeRun(
+    reason: 'normal' | 'cancel' | 'error' | 'safety' | 'lease-lost',
+  ): Promise<void> {
+    // eslint-disable-next-line no-console
+    console.debug(`uww-assist-card: native run done (${reason})`);
+    this._nativeRunner = undefined;
+    if (this._runner) {
+      this._runner.setFrameSink(null);
+    }
+    if (reason === 'error' || reason === 'safety') {
+      // Tear the wake runner down so a future Retry/arm rebuilds it
+      // from scratch — otherwise `_runner` lingers in 'muted' mode
+      // and `_startRunnerWithLease` short-circuits.
+      this._runner?.setAudioMode('muted');
+      await this._teardownRunner({ keepWants: true });
+      this._setError(new Error('Pipeline run failed'));
+      return;
+    }
+    if (reason === 'lease-lost') {
+      // Lease handler already kicked off teardown; reflect the
+      // waiting-for-lease state without claiming we're listening.
+      this._status = this._wantsArm ? 'loading' : 'idle';
+      return;
+    }
+    if (!this._wantsArm || !this._runner) {
+      this._status = 'idle';
+      this._runner?.setAudioMode('muted');
+      return;
+    }
+    // Brief blackout so the tail of TTS playback (already finished)
+    // and any room reverb can't immediately re-trigger.
+    const BLACKOUT_MS = 800;
+    this._ignoreWakeUntil = Date.now() + BLACKOUT_MS;
+    this._runner.setAudioMode('detector');
+    this._status = 'listening';
   }
 
   private async _afterDialogClose(): Promise<void> {
@@ -562,6 +681,8 @@ export class UwwAssistCard extends LitElement {
   }): Promise<void> {
     for (const off of this._runnerCleanups) off();
     this._runnerCleanups = [];
+    this._nativeRunner?.cancel('cancel');
+    this._nativeRunner = undefined;
     const runner = this._runner;
     this._runner = undefined;
     if (runner) {
@@ -633,7 +754,9 @@ export class UwwAssistCard extends LitElement {
       color: white;
     }
     .pill.status-wake,
-    .pill.status-busy {
+    .pill.status-busy,
+    .pill.status-thinking,
+    .pill.status-speaking {
       background: var(--warning-color, #ff9800);
       color: white;
     }
@@ -676,7 +799,9 @@ export class UwwAssistCard extends LitElement {
       color: white;
     }
     .compact-pill.status-wake,
-    .compact-pill.status-busy {
+    .compact-pill.status-busy,
+    .compact-pill.status-thinking,
+    .compact-pill.status-speaking {
       background: var(--warning-color, #ff9800);
       color: white;
     }

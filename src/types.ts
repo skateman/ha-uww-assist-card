@@ -26,6 +26,14 @@ export interface UwwAssistCardConfig {
   wasm_path?: string;
   /** Audible cue on wake. Defaults to 'chime'. */
   wake_sound?: 'chime' | 'beep' | 'none';
+  /**
+   * How to run the Assist pipeline after wake.
+   *   `dialog` – default; open HA's `ha-voice-command-dialog`
+   *   `native` – drive `assist_pipeline/run` directly via WebSocket
+   *              (skips dialog bootstrap + mic re-acquire; faster on
+   *              small/laggy devices, but no chat transcript UI)
+   */
+  runner?: 'dialog' | 'native';
   /** Lovelace card name override. */
   name?: string;
 }
@@ -35,6 +43,8 @@ export type CardStatus =
   | 'loading'
   | 'listening'
   | 'wake'
+  | 'thinking'
+  | 'speaking'
   | 'busy'
   | 'error';
 
