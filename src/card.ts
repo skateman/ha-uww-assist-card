@@ -131,7 +131,7 @@ export class UwwAssistCard extends LitElement {
       companion_app:
         'In the HA mobile app, hand off to the native Assist UI instead of opening the in-page dialog.',
       wasm_path:
-        'Override the tfjs-tflite WASM directory. Defaults to the copy shipped with the card.',
+        'Override the tfjs-tflite WASM directory. Defaults to a jsdelivr CDN URL; set this to a local path (e.g. /local/uww-wasm/) for fully offline operation.',
     };
 
     const SCHEMA = [

@@ -74,7 +74,8 @@ display: full               # full | compact | invisible
 wake_sound: chime           # chime | beep | none
 strict_sample_rate: false   # true → fail instead of resampling on Safari/iOS
 companion_app: dialog       # dialog | native
-# wasm_path:                # advanced override; defaults to bundled WASM
+# wasm_path:                # advanced override; defaults to jsdelivr CDN
+                            # (set to e.g. /local/uww-wasm/ for fully offline HA)
 ```
 
 Or use the visual editor (gear icon when adding/editing a card).

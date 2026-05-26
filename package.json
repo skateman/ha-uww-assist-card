@@ -1,6 +1,6 @@
 {
   "name": "ha-uww-assist-card",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "private": true,
   "description": "Home Assistant Lovelace custom card: in-browser microWakeWord detection that triggers HA's built-in Assist voice dialog.",
   "type": "module",

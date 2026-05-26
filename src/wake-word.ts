@@ -241,7 +241,7 @@ export class WakeWordRunner {
   private wasmPath(): string {
     return this.config.wasm_path
       ? this.resolveUrl(this.config.wasm_path)
-      : new URL('./wasm/', import.meta.url).toString();
+      : 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/wasm/';
   }
 
   private attach(uww: UWW): void {
