@@ -23,6 +23,8 @@ const tfliteFesm = fileURLToPath(
   ),
 );
 
+const tfliteVersion = require('@tensorflow/tfjs-tflite/package.json').version;
+
 const tfliteWasmDir = path.dirname(
   require.resolve('@tensorflow/tfjs-tflite/package.json'),
 );
@@ -60,6 +62,7 @@ export default {
       delimiters: ['', ''],
       values: {
         __HA_UWW_VERSION__: JSON.stringify(pkg.version),
+        __TFJS_TFLITE_VERSION__: JSON.stringify(tfliteVersion),
         [TFLITE_PROBE_NEEDLE]: TFLITE_PROBE_REPLACEMENT,
       },
     }),

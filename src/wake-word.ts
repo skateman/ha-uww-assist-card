@@ -7,6 +7,8 @@ import type { HassLite, UwwAssistCardConfig } from './types.js';
 export type { AudioMode } from './manual-pipeline.js';
 export type WakeWordEvent = 'wake' | 'statuschange' | 'error';
 
+declare const __TFJS_TFLITE_VERSION__: string;
+
 export interface WakeWordRunnerEvents {
   wake: { probability: number; timestamp: number };
   statuschange: { status: 'idle' | 'loading' | 'listening' | 'error' };
@@ -241,7 +243,7 @@ export class WakeWordRunner {
   private wasmPath(): string {
     return this.config.wasm_path
       ? this.resolveUrl(this.config.wasm_path)
-      : 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/wasm/';
+      : `https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@${__TFJS_TFLITE_VERSION__}/wasm/`;
   }
 
   private attach(uww: UWW): void {
