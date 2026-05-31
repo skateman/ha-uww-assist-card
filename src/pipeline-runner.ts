@@ -22,8 +22,20 @@ export interface PipelineRunnerOptions {
   pipelineId?: 'preferred' | 'last_used' | string;
   /** Stage transitions for the caller's UI. */
   onStage: (stage: PipelineStage) => void;
-  /** Called once when the run (including any continue-conversation chain) ends. */
-  onDone: (reason: 'normal' | 'cancel' | 'error' | 'safety' | 'lease-lost') => void;
+  /**
+   * Called once when the run (including any continue-conversation chain) ends.
+   *
+   * `continueConversation` reflects the LAST turn's value: it's true if HA
+   * said "this turn expected a follow-up" right before the chain ended
+   * (e.g. continue-conversation turn was cancelled mid-flight). For a
+   * normal end, this is always false because reaching the `else` branch
+   * of {@link onRunEnd} requires `!this.continueConversation`. Useful to
+   * the caller for picking an end-of-turn audio cue.
+   */
+  onDone: (
+    reason: 'normal' | 'cancel' | 'error' | 'safety' | 'lease-lost',
+    continueConversation: boolean,
+  ) => void;
   /** Called when the runner needs to control mic routing (mute during TTS, etc.). */
   setAudioMode: (mode: 'pipeline' | 'muted') => void;
 }
@@ -342,7 +354,7 @@ export class PipelineRunner {
     this.opts.setAudioMode('muted');
     this.opts.onStage(reason === 'error' ? 'error' : 'done');
     try {
-      this.opts.onDone(reason);
+      this.opts.onDone(reason, this.continueConversation);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('uww-assist-card: onDone threw', err);

@@ -25,7 +25,14 @@ export interface UwwAssistCardConfig {
   companion_app?: 'dialog' | 'native';
   wasm_path?: string;
   /** Audible cue on wake. Defaults to 'chime'. */
-  wake_sound?: 'chime' | 'beep' | 'none';
+  wake_sound?: 'default' | 'none' | string;
+  /**
+   * Global volume multiplier for the wake / listening / done cues.
+   * Clamped to 0..1; default 1.0 (full). Use this to dial them back
+   * on loud speakers, or to silence cues without affecting TTS.
+   * `wake_sound: 'none'` is a hard mute and takes precedence.
+   */
+  cue_volume?: number;
   /**
    * How to run the Assist pipeline after wake.
    *   `dialog` – default; open HA's `ha-voice-command-dialog`
@@ -41,6 +48,7 @@ export interface UwwAssistCardConfig {
 export type CardStatus =
   | 'idle'
   | 'loading'
+  | 'waiting'
   | 'listening'
   | 'wake'
   | 'thinking'

@@ -7,7 +7,14 @@ import { MicLeaseManager } from './mic-lease.js';
 import { PipelineRunner, type PipelineStage } from './pipeline-runner.js';
 import type { CardStatus, HassLite, UwwAssistCardConfig } from './types.js';
 import { WakeWordRunner } from './wake-word.js';
-import { playWakeSound, playListeningCue, type WakeSoundName } from './wake-sound.js';
+import {
+  installAudioPriming,
+  playDoneCue,
+  playThinkingCue,
+  playWakeSound,
+  setCueVolume,
+  type WakeSoundName,
+} from './wake-sound.js';
 
 declare const __HA_UWW_VERSION__: string;
 
@@ -57,6 +64,15 @@ export class UwwAssistCard extends LitElement {
     const wasConfigured = !!this._config;
     this._config = { ...config, wake_word_url: config.wake_word_url.trim() };
 
+    // Apply the per-card volume to the shared cue cache. If multiple
+    // cards are on one page, the last setConfig wins — the cues are
+    // process-global, not per-card.
+    if (typeof this._config.cue_volume === 'number') {
+      setCueVolume(this._config.cue_volume);
+    } else {
+      setCueVolume(1.0);
+    }
+
     if (wasConfigured) {
       void this._teardownRunner();
       this._wakeWordName = null;
@@ -101,19 +117,20 @@ export class UwwAssistCard extends LitElement {
   public static getConfigForm() {
     const LABELS: Record<string, string> = {
       name: 'Card name',
+      wake_sound: 'Wake-detection sound',
       wake_word_url: 'Wake-word URL',
       pipeline_id: 'Assist pipeline',
       display: 'Display mode',
       auto_start: 'Auto-start on load',
       auto_close: 'Auto-close after turn',
       strict_sample_rate: 'Strict sample-rate check',
-      wake_sound: 'Wake-detection sound',
       runner: 'Assist runner',
       companion_app: 'HA Companion app behavior',
       threshold: 'Detection threshold (0–1)',
       sliding_window_size: 'Sliding window (frames)',
       refractory_ms: 'Refractory period (ms)',
       wasm_path: 'TFLite WASM path (advanced)',
+      cue_volume: 'Cue volume (0–1)',
     };
     const HELPERS: Record<string, string> = {
       wake_word_url:
@@ -125,7 +142,9 @@ export class UwwAssistCard extends LitElement {
       strict_sample_rate:
         'Hard-fail instead of using in-browser resampling on browsers that ignore the requested 16 kHz rate (Safari/iOS).',
       wake_sound:
-        'Short audible cue played on detection, before HA opens the voice dialog.',
+        'Audible feedback for wake, thinking, and end-of-turn. Set to "None" to silence all cues (TTS is unaffected).',
+      cue_volume:
+        'Volume multiplier for the wake / listening / done cues. 0..1 (default 1.0). Use to dial them back on loud speakers without muting TTS.',
       runner:
         'Dialog = open HA\u2019s voice-command dialog. Native = drive the pipeline directly over WebSocket (faster on small/laggy devices; no chat UI).',
       companion_app:
@@ -144,12 +163,15 @@ export class UwwAssistCard extends LitElement {
           select: {
             mode: 'dropdown' as const,
             options: [
-              { value: 'chime', label: 'Chime (default)' },
-              { value: 'beep', label: 'Beep' },
+              { value: 'default', label: 'Default cues' },
               { value: 'none', label: 'None (silent)' },
             ],
           },
         },
+      },
+      {
+        name: 'cue_volume',
+        selector: { number: { min: 0, max: 1, step: 0.05, mode: 'slider' as const } },
       },
       {
         name: 'runner',
@@ -261,6 +283,7 @@ export class UwwAssistCard extends LitElement {
 
   public override connectedCallback(): void {
     super.connectedCallback();
+    installAudioPriming();
     this._ensureLease();
   }
 
@@ -315,6 +338,7 @@ export class UwwAssistCard extends LitElement {
       const pillLabel =
         this._error ? 'error' :
         !this._wantsArm ? 'tap to enable' :
+        this._status === 'waiting' ? 'waiting' :
         this._status === 'listening' ? 'listening' :
         this._status === 'wake' ? 'wake' :
         this._status === 'busy' ? 'busy' :
@@ -325,7 +349,10 @@ export class UwwAssistCard extends LitElement {
         <ha-card class="compact-card">
           <button
             class="compact-pill status-${this._status}"
-            ?disabled=${!clickable && this._status !== 'listening' && this._status !== 'wake'}
+            ?disabled=${!clickable &&
+              this._status !== 'waiting' &&
+              this._status !== 'listening' &&
+              this._status !== 'wake'}
             @click=${() =>
               clickable ? void this._arm() : void this._disarm()}
             title=${this._error
@@ -355,9 +382,7 @@ export class UwwAssistCard extends LitElement {
             <span class="pill status-${this._status}">${this._status}</span>
             ${this._leaseHeld
               ? html`<span class="pill lease">mic</span>`
-              : this._wantsArm
-                ? html`<span class="pill">waiting</span>`
-                : nothing}
+              : nothing}
             ${this._wakeCount > 0
               ? html`<span class="subtle"
                   >wakes: ${this._wakeCount}${this._lastWakeAt
@@ -447,9 +472,12 @@ export class UwwAssistCard extends LitElement {
       this._runnerCleanups.push(
         runner.on('statuschange', ({ status }) => {
           if (status === 'listening') {
-            // Stay in 'wake' state during the flash, then drop back to
-            // 'listening' on its own timer.
-            if (this._status !== 'wake') this._status = 'listening';
+            // Wake-word loop is armed and scanning audio for the wake
+            // word — visually that's "waiting", not "listening" (the
+            // latter is reserved for the post-wake STT phase).
+            // Stay in 'wake' state during the flash, then drop back
+            // to 'waiting' on its own timer.
+            if (this._status !== 'wake') this._status = 'waiting';
           } else if (status === 'loading') {
             this._status = 'loading';
           } else if (status === 'error') {
@@ -458,7 +486,7 @@ export class UwwAssistCard extends LitElement {
         }),
         runner.on('wake', ({ probability, timestamp }) => {
           const now = Date.now();
-          if (this._status !== 'listening' || now < this._ignoreWakeUntil) {
+          if (this._status !== 'waiting' || now < this._ignoreWakeUntil) {
             // eslint-disable-next-line no-console
             console.debug(
               `uww-assist-card: stray wake ignored ` +
@@ -484,7 +512,7 @@ export class UwwAssistCard extends LitElement {
 
       await runner.start();
       this._wakeWordName = runner.wakeWordName;
-      this._status = 'listening';
+      this._status = 'waiting';
     } catch (err) {
       this._setError(err);
       await this._teardownRunner({ keepWants: true });
@@ -525,7 +553,7 @@ export class UwwAssistCard extends LitElement {
     }
   }
 
-  private async _handleWakeDialog(soundName: WakeSoundName): Promise<void> {
+  private async _handleWakeDialog(_soundName: WakeSoundName): Promise<void> {
     // eslint-disable-next-line no-console
     console.debug('uww-assist-card: wake → pausing runner, opening dialog');
 
@@ -544,11 +572,6 @@ export class UwwAssistCard extends LitElement {
       pipelineId: this._config!.pipeline_id,
       companionApp: this._config!.companion_app ?? 'dialog',
       autoClose: this._config!.auto_close !== false,
-      onSttStart: () => {
-        // eslint-disable-next-line no-console
-        console.debug('uww-assist-card: STT started — playing listening cue');
-        void playListeningCue(soundName);
-      },
       onClose: () => {
         // eslint-disable-next-line no-console
         console.debug('uww-assist-card: bridge.onClose fired');
@@ -574,7 +597,8 @@ export class UwwAssistCard extends LitElement {
       pipelineId: this._config!.pipeline_id,
       setAudioMode: (mode) => this._runner!.setAudioMode(mode),
       onStage: (stage) => this._onNativeStage(stage, soundName),
-      onDone: (reason) => void this._afterNativeRun(reason),
+      onDone: (reason, continueConversation) =>
+        void this._afterNativeRun(reason, soundName, continueConversation),
     });
     this._nativeRunner = runner;
     this._runner!.setFrameSink((frame) => runner.feedFrame(frame));
@@ -594,13 +618,16 @@ export class UwwAssistCard extends LitElement {
         this._status = 'busy';
         break;
       case 'listening':
+        // No audible cue here: the wake-ack already told the user we
+        // heard them, and HA's `stt-start` arrives so close behind it
+        // that a second cue overlaps unpleasantly on small speakers.
         this._status = 'listening';
-        // Cue the user that STT is actually live (matches the dialog
-        // path's behaviour on `stt-start`).
-        void playListeningCue(soundName);
         break;
       case 'thinking':
         this._status = 'thinking';
+        // Soft tick: HA is processing the recognized text. Quiet so
+        // it doesn't compete with the TTS that follows.
+        void playThinkingCue(soundName);
         break;
       case 'speaking':
         this._status = 'speaking';
@@ -614,12 +641,25 @@ export class UwwAssistCard extends LitElement {
 
   private async _afterNativeRun(
     reason: 'normal' | 'cancel' | 'error' | 'safety' | 'lease-lost',
+    soundName: WakeSoundName,
+    continueConversation: boolean,
   ): Promise<void> {
     // eslint-disable-next-line no-console
-    console.debug(`uww-assist-card: native run done (${reason})`);
+    console.debug(
+      `uww-assist-card: native run done (${reason}, continue=${continueConversation})`,
+    );
     this._nativeRunner = undefined;
     if (this._runner) {
       this._runner.setFrameSink(null);
+    }
+    // Turn-end cue. Continue-conversation turns get no extra cue here
+    // — the natural wake `ding` already fired at intent-end and the
+    // next STT cycle starts immediately. Normal / error / safety
+    // turns play the "bloop" done cue to close out the session.
+    // Cancel / lease-lost get nothing (not user-initiated ends).
+    if (!continueConversation &&
+        (reason === 'normal' || reason === 'error' || reason === 'safety')) {
+      void playDoneCue(soundName);
     }
     if (reason === 'lease-lost') {
       // Lease handler kicked off teardown; reflect waiting state.
@@ -645,7 +685,7 @@ export class UwwAssistCard extends LitElement {
     const BLACKOUT_MS = 800;
     this._ignoreWakeUntil = Date.now() + BLACKOUT_MS;
     this._runner.setAudioMode('detector');
-    this._status = 'listening';
+    this._status = 'waiting';
   }
 
   private async _afterDialogClose(): Promise<void> {
@@ -669,7 +709,7 @@ export class UwwAssistCard extends LitElement {
         this._ignoreWakeUntil,
         Date.now() + BLACKOUT_MS,
       );
-      this._status = 'listening';
+      this._status = 'waiting';
     } catch (err) {
       this._setError(err);
     }
@@ -752,6 +792,10 @@ export class UwwAssistCard extends LitElement {
       background: var(--success-color, #4caf50);
       color: white;
     }
+    .pill.status-waiting {
+      background: var(--state-active-color, #78909c);
+      color: white;
+    }
     .pill.status-wake,
     .pill.status-busy,
     .pill.status-thinking,
@@ -795,6 +839,10 @@ export class UwwAssistCard extends LitElement {
     }
     .compact-pill.status-listening {
       background: var(--success-color, #4caf50);
+      color: white;
+    }
+    .compact-pill.status-waiting {
+      background: var(--state-active-color, #78909c);
       color: white;
     }
     .compact-pill.status-wake,
